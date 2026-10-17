@@ -3,12 +3,13 @@ app.py - Main Flask application for Markify (PDF to Markdown web converter).
 """
 
 import os
+from io import BytesIO
 import uuid
 from typing import List
 from flask import (
     Flask, render_template, request, redirect, url_for,
     send_file, jsonify, flash, abort
-)
+ )
 from werkzeug.utils import secure_filename
 import pymupdf as fitz
 
@@ -17,12 +18,20 @@ from database import (
     init_db, save_conversion, get_conversion_by_id,
     get_conversions_by_ids, get_all_conversions, delete_conversion
 )
+import boto3
+from  botocore.exceptions import ClientError
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 STORAGE_DIR = os.path.join(BASE_DIR, "storage")
 PDF_DIR = os.path.join(STORAGE_DIR, "pdfs")
 MD_DIR = os.path.join(STORAGE_DIR, "markdown")
+S3_BUCKET = os.environ.get(
+    "S3_BUCKET",
+    "markify-cca2-424511740048"
+)
+AWS_REGION = os.environ.get("AWS_REGION", "ap-south-1")
 
+s3 = boto3.client("s3", region_name=AWS_REGION)
 os.makedirs(PDF_DIR, exist_ok=True)
 os.makedirs(MD_DIR, exist_ok=True)
 
@@ -87,42 +96,57 @@ def convert():
         # Generate unique storage filenames
         conversion_id = str(uuid.uuid4())
         pdf_filename = f"{conversion_id}.pdf"
+
         md_filename = f"{conversion_id}.md"
+
+        #delete here
 
         pdf_path = os.path.join(PDF_DIR, pdf_filename)
         md_path = os.path.join(MD_DIR, md_filename)
 
         try:
-            # Save uploaded PDF to storage
+            # Save PDF temporarily for validation and conversion
             file.save(pdf_path)
 
-            # Check PDF validity and page count
+            # Validate PDF and get page count
             try:
-                doc = fitz.open(pdf_path)
-                page_count = len(doc)
-                doc.close()
+                with fitz.open(pdf_path) as doc:
+                    page_count = len(doc)
             except Exception:
                 os.remove(pdf_path)
-                conversion_errors.append(f"'{clean_name}': Invalid or corrupted PDF file.")
+                conversion_errors.append(
+                    f"'{clean_name}': Invalid or corrupted PDF file."
+                )
                 continue
 
-            # Convert PDF to Markdown
+            # Convert PDF to Markdown locally
             markdown_content = pdf_to_markdown(pdf_path)
 
-            # Save Markdown to storage
             with open(md_path, "w", encoding="utf-8") as md_file:
                 md_file.write(markdown_content)
 
-            # Save to SQLite database
+            # Upload both files to S3
+            pdf_key = f"pdfs/{pdf_filename}"
+            md_key = f"markdown/{md_filename}"
+
+            s3.upload_file(pdf_path, S3_BUCKET, pdf_key)
+            s3.upload_file(md_path, S3_BUCKET, md_key)
+
+            # Store S3 locations in SQLite
             save_conversion(
                 conversion_id=conversion_id,
                 original_filename=clean_name,
-                pdf_path=pdf_path,
-                md_path=md_path,
+                pdf_path=f"s3://{S3_BUCKET}/{pdf_key}",
+                md_path=f"s3://{S3_BUCKET}/{md_key}",
                 page_count=page_count
             )
+
             converted_ids.append(conversion_id)
 
+            # Remove temporary local copies after successful save
+            os.remove(pdf_path)
+            os.remove(md_path)
+            #delete here
         except ScannedPDFError as e:
             if os.path.exists(pdf_path):
                 os.remove(pdf_path)
@@ -172,12 +196,23 @@ def result(conversion_id: str):
     if not current_conv:
         abort(404, description="Conversion not found.")
 
-    # Read active Markdown content
+#delete
+    
+        # Read Markdown content from S3
     md_content = ""
-    if os.path.exists(current_conv["md_path"]):
-        with open(current_conv["md_path"], "r", encoding="utf-8") as f:
-            md_content = f.read()
-
+    try:
+        md_response = s3.get_object(
+            Bucket=S3_BUCKET,
+            Key=current_conv["md_path"].replace(
+                f"s3://{S3_BUCKET}/", ""
+            )
+        )
+        md_content = md_response["Body"].read().decode("utf-8")
+    except ClientError as e:
+        app.logger.error("Could not read Markdown from S3: %s", e)
+        abort(404, description="Markdown file not found.")
+    
+#delete
     # Determine batch items
     batch_param = request.args.get("batch", "").strip()
     if batch_param:
@@ -208,34 +243,47 @@ def result(conversion_id: str):
         auto_download_list=auto_download_list
     )
 
-
 @app.route("/download/md/<conversion_id>", methods=["GET"])
 def download_md(conversion_id: str):
-    """Downloads the generated Markdown file."""
+    """Downloads the generated Markdown file from S3."""
     conv = get_conversion_by_id(conversion_id)
-    if not conv or not os.path.exists(conv["md_path"]):
+    if not conv:
+        abort(404, description="Conversion not found.")
+
+    try:
+        md_key = conv["md_path"].replace(f"s3://{S3_BUCKET}/", "")
+        response = s3.get_object(Bucket=S3_BUCKET, Key=md_key)
+        content = response["Body"].read()
+    except ClientError as e:
+        app.logger.error("Could not download Markdown from S3: %s", e)
         abort(404, description="Markdown file not found.")
 
     stem = os.path.splitext(conv["original_filename"])[0]
-    download_filename = f"{stem}.md"
-
     return send_file(
-        conv["md_path"],
+        BytesIO(content),
         as_attachment=True,
-        download_name=download_filename,
+        download_name=f"{stem}.md",
         mimetype="text/markdown"
     )
 
 
 @app.route("/download/pdf/<conversion_id>", methods=["GET"])
 def download_pdf(conversion_id: str):
-    """Downloads the original PDF file."""
+    """Downloads the original PDF file from S3."""
     conv = get_conversion_by_id(conversion_id)
-    if not conv or not os.path.exists(conv["pdf_path"]):
+    if not conv:
+        abort(404, description="Conversion not found.")
+
+    try:
+        pdf_key = conv["pdf_path"].replace(f"s3://{S3_BUCKET}/", "")
+        response = s3.get_object(Bucket=S3_BUCKET, Key=pdf_key)
+        content = response["Body"].read()
+    except ClientError as e:
+        app.logger.error("Could not download PDF from S3: %s", e)
         abort(404, description="PDF file not found.")
 
     return send_file(
-        conv["pdf_path"],
+        BytesIO(content),
         as_attachment=True,
         download_name=conv["original_filename"],
         mimetype="application/pdf"
@@ -251,26 +299,38 @@ def history():
 
 @app.route("/delete/<conversion_id>", methods=["POST"])
 def delete(conversion_id: str):
-    """Deletes conversion record from DB and deletes both files from storage."""
-    record = delete_conversion(conversion_id)
-    if record:
-        if os.path.exists(record["pdf_path"]):
-            try:
-                os.remove(record["pdf_path"])
-            except OSError:
-                pass
-        if os.path.exists(record["md_path"]):
-            try:
-                os.remove(record["md_path"])
-            except OSError:
-                pass
+    """Deletes a conversion and its files from S3."""
+    record = get_conversion_by_id(conversion_id)
+
+    if not record:
+        abort(404, description="Conversion not found.")
+
+    try:
+        pdf_key = record["pdf_path"].replace(
+            f"s3://{S3_BUCKET}/", ""
+        )
+        md_key = record["md_path"].replace(
+            f"s3://{S3_BUCKET}/", ""
+        )
+
+        s3.delete_object(Bucket=S3_BUCKET, Key=pdf_key)
+        s3.delete_object(Bucket=S3_BUCKET, Key=md_key)
+
+    except ClientError as e:
+        app.logger.error("Could not delete files from S3: %s", e)
+        abort(500, description="Could not delete conversion files.")
+
+    delete_conversion(conversion_id)
 
     if request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.is_json:
-        return jsonify({"success": True, "message": "Conversion deleted successfully."})
+        return jsonify({
+            "success": True,
+            "message": "Conversion deleted successfully."
+        })
 
     flash("Conversion deleted successfully.", "success")
     return redirect(url_for("history"))
 
-
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=False)
+
