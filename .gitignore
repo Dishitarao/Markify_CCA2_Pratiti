@@ -1,0 +1,17 @@
+# Storage directories
+/storage/
+storage/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environment & testing
+.env
+.venv
+env/
+venv/
+test_data/
+.pytest_cache/

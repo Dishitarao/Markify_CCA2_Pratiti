@@ -1,0 +1,264 @@
+{% extends "base.html" %}
+
+{% block title %}Markify - Welcome to Markify{% endblock %}
+
+{% block content %}
+<div class="hero-wrapper">
+  <h1 class="hero-heading">Markify</h1>
+  <p class="hero-subheading">Effortlessly convert your PDF documents into clean, structured Markdown.</p>
+  
+
+  <div class="upload-card">
+    <form id="upload-form" action="{{ url_for('convert') }}" method="POST" enctype="multipart/form-data">
+      
+      <!-- Dropzone / File Picker -->
+      <div class="dropzone" id="dropzone" role="button" tabindex="0" aria-label="Upload PDF files">
+        <svg class="dropzone-icon" viewBox="0 0 24 24">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+          <polyline points="17 8 12 3 7 8"></polyline>
+          <line x1="12" y1="3" x2="12" y2="15"></line>
+        </svg>
+        <div class="dropzone-text">Click or drag & drop PDF files here</div>
+        <div class="dropzone-subtext">Supports multiple .pdf files (Max 20 MB total)</div>
+        <input 
+          type="file" 
+          id="pdf-files-input" 
+          name="pdf_files" 
+          accept=".pdf,application/pdf" 
+          multiple 
+          class="file-input-hidden" 
+        />
+      </div>
+
+      <!-- File List Preview -->
+      <div id="file-list" class="file-list" style="display: none;"></div>
+
+      <!-- Error banner inside card if client validation fails -->
+      <div id="client-error" class="flash-msg error" style="display: none; margin-top: 1rem;">
+        <span id="client-error-text"></span>
+      </div>
+
+      <!-- Actions -->
+      <div class="upload-actions">
+        <button type="submit" id="enter-btn" class="btn btn-primary btn-enter" disabled>
+          Enter
+        </button>
+      </div>
+
+      <!-- Loading State Overlay -->
+      <div id="loading-state" class="loading-overlay">
+        <div class="loading-spinner"></div>
+        <div class="loading-text" id="loading-text">Converting document(s)... Please wait</div>
+      </div>
+
+    </form>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+  document.addEventListener('DOMContentLoaded', () => {
+    const dropzone = document.getElementById('dropzone');
+    const fileInput = document.getElementById('pdf-files-input');
+    const enterBtn = document.getElementById('enter-btn');
+    const fileListContainer = document.getElementById('file-list');
+    const clientError = document.getElementById('client-error');
+    const clientErrorText = document.getElementById('client-error-text');
+    const form = document.getElementById('upload-form');
+    const loadingState = document.getElementById('loading-state');
+    const loadingText = document.getElementById('loading-text');
+
+    let selectedFiles = [];
+
+    // Trigger file dialog on click
+    dropzone.addEventListener('click', () => fileInput.click());
+    dropzone.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        fileInput.click();
+      }
+    });
+
+    // Drag & Drop events
+    ['dragenter', 'dragover'].forEach(eventName => {
+      dropzone.addEventListener(eventName, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dropzone.classList.add('dragover');
+      });
+    });
+
+    ['dragleave', 'drop'].forEach(eventName => {
+      dropzone.addEventListener(eventName, (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        dropzone.classList.remove('dragover');
+      });
+    });
+
+    dropzone.addEventListener('drop', (e) => {
+      const dt = e.dataTransfer;
+      if (dt && dt.files && dt.files.length > 0) {
+        handleFiles(dt.files);
+      }
+    });
+
+    fileInput.addEventListener('change', () => {
+      if (fileInput.files && fileInput.files.length > 0) {
+        handleFiles(fileInput.files);
+      }
+    });
+
+    function formatBytes(bytes) {
+      if (bytes === 0) return '0 Bytes';
+      const k = 1024;
+      const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+    }
+
+    function showError(msg) {
+      clientErrorText.textContent = msg;
+      clientError.style.display = 'flex';
+    }
+
+    function clearError() {
+      clientError.style.display = 'none';
+      clientErrorText.textContent = '';
+    }
+
+    function handleFiles(files) {
+      clearError();
+      const newFiles = Array.from(files);
+
+      // Check for non-PDFs
+      for (const f of newFiles) {
+        if (!f.name.toLowerCase().endsWith('.pdf') && f.type !== 'application/pdf') {
+          showError(`'${f.name}' is not a PDF. Only PDF files (.pdf) are allowed.`);
+          return;
+        }
+      }
+
+      // Add to selected list (prevent duplicate names in current selection)
+      for (const f of newFiles) {
+        if (!selectedFiles.some(existing => existing.name === f.name && existing.size === f.size)) {
+          selectedFiles.push(f);
+        }
+      }
+
+      // Check total size limit (20 MB)
+      const totalSize = selectedFiles.reduce((acc, f) => acc + f.size, 0);
+      if (totalSize > 20 * 1024 * 1024) {
+        showError(`Total file size (${formatBytes(totalSize)}) exceeds the 20 MB limit.`);
+        selectedFiles = [];
+        renderFileList();
+        enterBtn.disabled = true;
+        return;
+      }
+
+      renderFileList();
+      updateEnterButtonState();
+    }
+
+    function renderFileList() {
+      if (selectedFiles.length === 0) {
+        fileListContainer.style.display = 'none';
+        fileListContainer.innerHTML = '';
+        return;
+      }
+
+      fileListContainer.style.display = 'flex';
+      fileListContainer.innerHTML = '';
+
+      selectedFiles.forEach((file, index) => {
+        const item = document.createElement('div');
+        item.className = 'file-item';
+
+        const info = document.createElement('div');
+        info.className = 'file-item-info';
+
+        const icon = document.createElement('span');
+        icon.innerHTML = '📄';
+
+        const name = document.createElement('span');
+        name.className = 'file-item-name';
+        name.textContent = file.name;
+
+        const size = document.createElement('span');
+        size.className = 'file-item-size';
+        size.textContent = `(${formatBytes(file.size)})`;
+
+        info.appendChild(icon);
+        info.appendChild(name);
+        info.appendChild(size);
+
+        const removeBtn = document.createElement('button');
+        removeBtn.type = 'button';
+        removeBtn.className = 'file-item-remove';
+        removeBtn.innerHTML = '&times;';
+        removeBtn.title = 'Remove file';
+        removeBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          selectedFiles.splice(index, 1);
+          renderFileList();
+          updateEnterButtonState();
+        });
+
+        item.appendChild(info);
+        item.appendChild(removeBtn);
+        fileListContainer.appendChild(item);
+      });
+    }
+
+    function updateEnterButtonState() {
+      enterBtn.disabled = (selectedFiles.length === 0);
+    }
+
+    // Form submission
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (selectedFiles.length === 0) return;
+
+      clearError();
+      enterBtn.disabled = true;
+      enterBtn.style.display = 'none';
+      loadingState.style.display = 'flex';
+      loadingText.textContent = selectedFiles.length > 1
+        ? `Converting ${selectedFiles.length} documents... Please wait`
+        : 'Converting document... Please wait';
+
+      const formData = new FormData();
+      selectedFiles.forEach(file => {
+        formData.append('pdf_files', file);
+      });
+
+      try {
+        const response = await fetch("{{ url_for('convert') }}", {
+          method: 'POST',
+          headers: {
+            'X-Requested-With': 'XMLHttpRequest'
+          },
+          body: formData
+        });
+
+        const data = await response.json();
+
+        if (response.ok && data.success) {
+          window.location.href = data.redirect_url;
+        } else {
+          showError(data.error || 'Conversion failed. Please try again.');
+          loadingState.style.display = 'none';
+          enterBtn.style.display = 'inline-flex';
+          enterBtn.disabled = false;
+        }
+      } catch (err) {
+        showError('Network error or server timeout. Please check your connection and try again.');
+        loadingState.style.display = 'none';
+        enterBtn.style.display = 'inline-flex';
+        enterBtn.disabled = false;
+      }
+    });
+  });
+</script>
+{% endblock %}
