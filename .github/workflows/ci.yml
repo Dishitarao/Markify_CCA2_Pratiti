@@ -1,0 +1,35 @@
+
+name: Markify CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Build and test Markify
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t markify:ci .
+
+      - name: Run application tests
+        run: |
+          docker run --rm \
+            --network none \
+            -e AWS_EC2_METADATA_DISABLED=true \
+            -e S3_BUCKET=markify-cca2-424511740048 \
+            --entrypoint python \
+            markify:ci \
+            -m unittest test_app -v
