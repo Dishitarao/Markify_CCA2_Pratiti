@@ -14,7 +14,7 @@ pipeline {
         stage('Checkout') {
             steps {
                 git branch: 'main',
-                    url: 'https://github.com/pratitipatlia/markify.git'
+                    url: 'https://github.com/Dishitarao/Markify_CCA2_Pratiti.git'
             }
         }
 
